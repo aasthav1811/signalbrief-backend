@@ -21,7 +21,7 @@ app.add_middleware(
 )
 
 model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash",
+    model_name="gemini-1.5-flash-latest",
     system_instruction="""You are SignalBrief AI, a B2B sales intelligence system.
 Generate a concise, cited pre-meeting sales brief using only real, current information.
 Focus on 2024-2026 data.
