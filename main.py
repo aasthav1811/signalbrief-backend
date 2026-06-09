@@ -1,15 +1,13 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-import google.generativeai as genai
 import os
 import json
 import re
+import httpx
 from dotenv import load_dotenv
 
 load_dotenv()
-
-genai.configure(api_key=os.getenv("GEMINI_API_KEY"))
 
 app = FastAPI()
 
@@ -20,9 +18,10 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-model = genai.GenerativeModel(
-    model_name="gemini-1.5-flash-latest",
-    system_instruction="""You are SignalBrief AI, a B2B sales intelligence system.
+GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
+
+SYSTEM_PROMPT = """You are SignalBrief AI, a B2B sales intelligence system.
 Generate a concise, cited pre-meeting sales brief using only real, current information.
 Focus on 2024-2026 data.
 
@@ -53,31 +52,46 @@ Schema:
 }
 
 Rules:
-- All facts must be real and current — no hallucinations
+- All facts must be real and current
 - Confidence: 80+ verified, 60-79 moderate, 40-59 inferred
 - filtered_count = insights dropped for confidence below 30
 - Every talking point must reference a specific real signal
 - source_url must be a plausible real URL"""
-)
 
 class BriefRequest(BaseModel):
     company: str
 
 @app.post("/generate-brief")
 async def generate_brief(req: BriefRequest):
-    prompt = f"Generate a sales brief for: {req.company}. Research their latest funding rounds, news, product launches, and hiring trends from 2024-2026."
-    
-    response = model.generate_content(prompt)
-    text = response.text.strip()
-    
-    # Strip any markdown fences if model adds them
+    prompt = f"{SYSTEM_PROMPT}\n\nGenerate a sales brief for: {req.company}. Include their latest funding rounds, news, product launches, and hiring trends from 2024-2026."
+
+    payload = {
+        "contents": [
+            {
+                "parts": [{"text": prompt}]
+            }
+        ],
+        "generationConfig": {
+            "temperature": 0.3,
+            "maxOutputTokens": 2048
+        }
+    }
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(GEMINI_URL, json=payload)
+        response.raise_for_status()
+        data = response.json()
+
+    text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+    # Strip markdown fences if present
     text = re.sub(r'```json|```', '', text).strip()
-    
-    # Extract JSON object
+
+    # Extract JSON
     start = text.index('{')
     end = text.rindex('}') + 1
     brief = json.loads(text[start:end])
-    
+
     return brief
 
 @app.get("/")
