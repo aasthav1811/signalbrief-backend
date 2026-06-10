@@ -60,46 +60,79 @@ Rules:
 class BriefRequest(BaseModel):
     company: str
 
+@app.get("/list-models")
+async def list_models():
+    """Debug endpoint to see available models for this API key"""
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY not set")
+    url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        response = await client.get(url)
+        data = response.json()
+    models = [m["name"] for m in data.get("models", []) if "generateContent" in m.get("supportedGenerationMethods", [])]
+    return {"available_models": models}
+
 @app.post("/generate-brief")
 async def generate_brief(req: BriefRequest):
     if not GEMINI_API_KEY:
         raise HTTPException(status_code=500, detail="GEMINI_API_KEY not set")
 
-    prompt = f"{SYSTEM_PROMPT}\n\nGenerate a sales brief for: {req.company}. Include their latest funding rounds, news, product launches, and hiring trends from 2024-2026."
+    # First get available models dynamically
+    list_url = f"https://generativelanguage.googleapis.com/v1beta/models?key={GEMINI_API_KEY}"
+    async with httpx.AsyncClient(timeout=30.0) as client:
+        list_resp = await client.get(list_url)
+        list_data = list_resp.json()
 
-    # Try models in order until one works
-    models = [
-        "gemini-1.5-flash",
-        "gemini-1.5-pro",
-        "gemini-pro"
+    available = [
+        m["name"].replace("models/", "")
+        for m in list_data.get("models", [])
+        if "generateContent" in m.get("supportedGenerationMethods", [])
     ]
 
-    last_error = None
-    for model_name in models:
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048}
-        }
-        try:
-            async with httpx.AsyncClient(timeout=60.0) as client:
-                response = await client.post(url, json=payload)
-                if response.status_code == 404:
-                    last_error = f"{model_name} not found"
-                    continue
-                response.raise_for_status()
-                data = response.json()
-                text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-                text = re.sub(r'```json|```', '', text).strip()
-                start = text.index('{')
-                end = text.rindex('}') + 1
-                brief = json.loads(text[start:end])
-                return brief
-        except Exception as e:
-            last_error = str(e)
-            continue
+    # Preferred order
+    preferred = [
+        "gemini-2.0-flash",
+        "gemini-2.0-flash-lite",
+        "gemini-1.5-flash",
+        "gemini-1.5-flash-8b",
+        "gemini-1.5-pro",
+        "gemini-pro",
+    ]
 
-    raise HTTPException(status_code=500, detail=f"All models failed. Last error: {last_error}")
+    # Pick first preferred model that is available
+    model_name = None
+    for p in preferred:
+        if p in available:
+            model_name = p
+            break
+
+    # Fallback: just use first available
+    if not model_name and available:
+        model_name = available[0]
+
+    if not model_name:
+        raise HTTPException(status_code=500, detail=f"No generateContent models available. Models found: {list_data}")
+
+    prompt = f"{SYSTEM_PROMPT}\n\nGenerate a sales brief for: {req.company}. Include their latest funding rounds, news, product launches, and hiring trends from 2024-2026."
+
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+    payload = {
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048}
+    }
+
+    async with httpx.AsyncClient(timeout=60.0) as client:
+        response = await client.post(url, json=payload)
+        response.raise_for_status()
+        data = response.json()
+
+    text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+    text = re.sub(r'```json|```', '', text).strip()
+    start = text.index('{')
+    end = text.rindex('}') + 1
+    brief = json.loads(text[start:end])
+    brief["_model_used"] = model_name
+    return brief
 
 @app.get("/")
 def root():
