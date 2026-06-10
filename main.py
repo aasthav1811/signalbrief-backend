@@ -84,31 +84,29 @@ async def generate_brief(req: BriefRequest):
         list_data = list_resp.json()
 
     available = [
-        m["name"].replace("models/", "")
+        m["name"]
         for m in list_data.get("models", [])
         if "generateContent" in m.get("supportedGenerationMethods", [])
     ]
 
-    # Preferred order
+    # Preferred order — match exact names from /list-models (with models/ prefix stripped)
     preferred = [
-        "gemini-2.0-flash",
-        "gemini-2.0-flash-lite",
-        "gemini-1.5-flash",
-        "gemini-1.5-flash-8b",
-        "gemini-1.5-pro",
-        "gemini-pro",
+        "models/gemini-2.0-flash",
+        "models/gemini-2.5-flash",
+        "models/gemini-2.0-flash-lite",
+        "models/gemini-flash-latest",
     ]
 
     # Pick first preferred model that is available
     model_name = None
     for p in preferred:
         if p in available:
-            model_name = p
+            model_name = p.replace("models/", "")
             break
 
-    # Fallback: just use first available
+    # Fallback: just use first available, strip models/ prefix
     if not model_name and available:
-        model_name = available[0]
+        model_name = available[0].replace("models/", "")
 
     if not model_name:
         raise HTTPException(status_code=500, detail=f"No generateContent models available. Models found: {list_data}")
