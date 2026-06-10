@@ -1,4 +1,4 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 import os
@@ -19,7 +19,6 @@ app.add_middleware(
 )
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-GEMINI_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key={GEMINI_API_KEY}"
 
 SYSTEM_PROMPT = """You are SignalBrief AI, a B2B sales intelligence system.
 Generate a concise, cited pre-meeting sales brief using only real, current information.
@@ -63,36 +62,44 @@ class BriefRequest(BaseModel):
 
 @app.post("/generate-brief")
 async def generate_brief(req: BriefRequest):
+    if not GEMINI_API_KEY:
+        raise HTTPException(status_code=500, detail="GEMINI_API_KEY not set")
+
     prompt = f"{SYSTEM_PROMPT}\n\nGenerate a sales brief for: {req.company}. Include their latest funding rounds, news, product launches, and hiring trends from 2024-2026."
 
-    payload = {
-        "contents": [
-            {
-                "parts": [{"text": prompt}]
-            }
-        ],
-        "generationConfig": {
-            "temperature": 0.3,
-            "maxOutputTokens": 2048
+    # Try models in order until one works
+    models = [
+        "gemini-1.5-flash",
+        "gemini-1.5-pro",
+        "gemini-pro"
+    ]
+
+    last_error = None
+    for model_name in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model_name}:generateContent?key={GEMINI_API_KEY}"
+        payload = {
+            "contents": [{"parts": [{"text": prompt}]}],
+            "generationConfig": {"temperature": 0.3, "maxOutputTokens": 2048}
         }
-    }
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(url, json=payload)
+                if response.status_code == 404:
+                    last_error = f"{model_name} not found"
+                    continue
+                response.raise_for_status()
+                data = response.json()
+                text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
+                text = re.sub(r'```json|```', '', text).strip()
+                start = text.index('{')
+                end = text.rindex('}') + 1
+                brief = json.loads(text[start:end])
+                return brief
+        except Exception as e:
+            last_error = str(e)
+            continue
 
-    async with httpx.AsyncClient(timeout=60.0) as client:
-        response = await client.post(GEMINI_URL, json=payload)
-        response.raise_for_status()
-        data = response.json()
-
-    text = data["candidates"][0]["content"]["parts"][0]["text"].strip()
-
-    # Strip markdown fences if present
-    text = re.sub(r'```json|```', '', text).strip()
-
-    # Extract JSON
-    start = text.index('{')
-    end = text.rindex('}') + 1
-    brief = json.loads(text[start:end])
-
-    return brief
+    raise HTTPException(status_code=500, detail=f"All models failed. Last error: {last_error}")
 
 @app.get("/")
 def root():
